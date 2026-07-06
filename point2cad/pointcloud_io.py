@@ -190,7 +190,9 @@ def segment_planar_surfaces(
     pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
 
     if voxel_size > 0:
-        pcd = pcd.voxel_down_sample(voxel_size)
+        extent = np.linalg.norm(points.max(axis=0) - points.min(axis=0))
+        effective_voxel_size = min(voxel_size, extent / 1000)
+        pcd = pcd.voxel_down_sample(effective_voxel_size)
 
     pcd.estimate_normals(
         search_param=o3d.geometry.KDTreeSearchParamHybrid(
@@ -207,8 +209,8 @@ def segment_planar_surfaces(
         search_param=o3d.geometry.KDTreeSearchParamKNN(knn=knn),
     )
 
-    if len(patches) == 0:
-        raise RuntimeError("Planar surface segmentation found no patches")
+    if len(patches) < 3:
+        return segment_planes_ransac(points, min_num_points=min_num_points)
 
     sample_points = np.asarray(pcd.points)
     sample_labels = -np.ones(len(sample_points), dtype=np.int32)
@@ -223,14 +225,54 @@ def segment_planar_surfaces(
     if not np.any(labeled_mask):
         raise RuntimeError("Planar surface segmentation labeled no points")
 
-    if len(sample_points) == len(points):
-        points = points[labeled_mask]
-        labels = continuous_labels(sample_labels[labeled_mask].astype(np.int32))
-        return points, labels
-
     from scipy.spatial import cKDTree
 
     tree = cKDTree(sample_points[labeled_mask])
     _, nearest = tree.query(points.astype(np.float64), k=1)
     labels = continuous_labels(sample_labels[labeled_mask][nearest].astype(np.int32))
     return points, labels
+
+
+def segment_planes_ransac(points, min_num_points=50, max_planes=128):
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+
+    extent = np.linalg.norm(points.max(axis=0) - points.min(axis=0))
+    distance_threshold = max(extent / 200, np.finfo(np.float32).eps)
+    remaining = pcd
+    remaining_indices = np.arange(len(points))
+    labels = -np.ones(len(points), dtype=np.int32)
+    plane_models = []
+
+    for plane_id in range(max_planes):
+        if len(remaining.points) < min_num_points:
+            break
+
+        plane_model, inliers = remaining.segment_plane(
+            distance_threshold=distance_threshold,
+            ransac_n=3,
+            num_iterations=2000,
+        )
+        inliers = np.asarray(inliers, dtype=np.int64)
+        if len(inliers) < min_num_points:
+            break
+
+        original_indices = remaining_indices[inliers]
+        labels[original_indices] = plane_id
+        plane_models.append(np.asarray(plane_model, dtype=np.float64))
+
+        remaining = remaining.select_by_index(inliers, invert=True)
+        remaining_indices = np.delete(remaining_indices, inliers)
+
+    if len(plane_models) == 0:
+        raise RuntimeError("Planar surface segmentation found no patches")
+
+    unlabeled = labels < 0
+    if np.any(unlabeled):
+        plane_models = np.stack(plane_models, axis=0)
+        normals = plane_models[:, :3]
+        offsets = plane_models[:, 3]
+        distances = np.abs(points[unlabeled] @ normals.T + offsets)
+        labels[unlabeled] = np.argmin(distances, axis=1)
+
+    return points, continuous_labels(labels.astype(np.int32))

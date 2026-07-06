@@ -69,6 +69,15 @@ def run_pipeline(cfg, path_in, path_out, device, color_list, fn_process):
     save_topology(clipped_meshes, f"{path_out}/topo/topo.json")
 
 
+def output_path_for_input(path_in, path_out, has_multiple_inputs):
+    stem = Path(path_in).stem
+    if path_out is None:
+        return os.path.join("outputs", stem)
+    if has_multiple_inputs:
+        return os.path.join(path_out, stem)
+    return path_out
+
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -76,7 +85,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Point2CAD pipeline")
     parser.add_argument("--path_in", type=str, default="./assets/abc_00949.xyzc")
-    parser.add_argument("--path_out", type=str, default="./out")
+    parser.add_argument(
+        "--path_out",
+        type=str,
+        default=None,
+        help="Output directory. Defaults to outputs/<input filename without extension>.",
+    )
     parser.add_argument("--validate_checkpoint_path", type=str, default=None)
     parser.add_argument("--silent", default=True)
     parser.add_argument("--seed", type=int, default=2023)
@@ -109,14 +123,10 @@ if __name__ == "__main__":
         fn_process = process_multiprocessing
 
     assert os.path.exists(cfg.path_in), "Input points could not be accessed"
-    os.makedirs(cfg.path_out, exist_ok=True)
 
     input_paths = resolve_input_paths(cfg.path_in)
     for path_in in input_paths:
-        if len(input_paths) == 1:
-            path_out = cfg.path_out
-        else:
-            path_out = os.path.join(cfg.path_out, Path(path_in).stem)
+        path_out = output_path_for_input(path_in, cfg.path_out, len(input_paths) > 1)
         run_pipeline(cfg, path_in, path_out, device, color_list, fn_process)
 
     print("Done")

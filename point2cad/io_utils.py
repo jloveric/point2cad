@@ -1,17 +1,68 @@
 import itertools
 import json
 import numpy as np
+import open3d as o3d
 import pymesh
 import pyvista as pv
 import scipy
 import trimesh
 from collections import Counter
+from open3d.visualization import rendering
 
 from point2cad.utils import suppress_output_fd
 
 
 def surface_color(color_list, index):
     return color_list[index % len(color_list)]
+
+
+def export_mesh_with_obj(mesh, out_path):
+    mesh.export(out_path)
+    if out_path.lower().endswith(".ply"):
+        mesh.export(out_path[:-4] + ".obj")
+        render_mesh(mesh, out_path[:-4] + ".png")
+
+
+def render_mesh(mesh, out_path, width=1600, height=1200):
+    o3d_mesh = trimesh_to_open3d_for_render(mesh)
+    o3d_mesh.compute_vertex_normals()
+
+    renderer = rendering.OffscreenRenderer(width, height)
+    renderer.scene.set_background([1.0, 1.0, 1.0, 1.0])
+
+    material = rendering.MaterialRecord()
+    material.shader = "defaultLit"
+    renderer.scene.add_geometry("mesh", o3d_mesh, material)
+
+    bbox = o3d_mesh.get_axis_aligned_bounding_box()
+    center = bbox.get_center()
+    extent = np.linalg.norm(bbox.get_extent())
+    eye = center + np.array([1.0, -1.4, 0.9]) * max(extent, 1.0)
+    up = np.array([0.0, 0.0, 1.0])
+    renderer.setup_camera(45.0, center, eye, up)
+
+    image = renderer.render_to_image()
+    o3d.io.write_image(out_path, image)
+
+
+def trimesh_to_open3d_for_render(mesh):
+    vertices = np.asarray(mesh.vertices)
+    faces = np.asarray(mesh.faces)
+    render_vertices = vertices[faces.reshape(-1)]
+    render_faces = np.arange(len(render_vertices), dtype=np.int32).reshape(-1, 3)
+
+    o3d_mesh = o3d.geometry.TriangleMesh(
+        o3d.utility.Vector3dVector(render_vertices),
+        o3d.utility.Vector3iVector(render_faces),
+    )
+
+    face_colors = np.asarray(mesh.visual.face_colors)
+    if len(face_colors) == len(faces):
+        colors = np.repeat(face_colors[:, :3] / 255.0, 3, axis=0)
+    else:
+        colors = np.full((len(render_vertices), 3), 0.7)
+    o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+    return o3d_mesh
 
 
 def save_unclipped_meshes(meshes, color_list, out_path):
@@ -32,7 +83,7 @@ def save_unclipped_meshes(meshes, color_list, out_path):
         )
 
     final_non_clipped = trimesh.util.concatenate(non_clipped_meshes)
-    final_non_clipped.export(out_path)
+    export_mesh_with_obj(final_non_clipped, out_path)
 
     return pm_meshes
 
@@ -120,7 +171,7 @@ def save_clipped_meshes(pm_meshes, out_meshes, color_list, out_path):
         clipped_meshes.append(clipped_mesh)
 
     clipped = trimesh.util.concatenate(clipped_meshes)
-    clipped.export(out_path)
+    export_mesh_with_obj(clipped, out_path)
 
     return clipped_meshes
 
