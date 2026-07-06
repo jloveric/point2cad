@@ -2,6 +2,7 @@ import numpy as np
 import open3d as o3d
 import os
 import pyvista as pv
+import tempfile
 import torch
 import warnings
 from tqdm import tqdm
@@ -14,6 +15,14 @@ from point2cad.utils import get_rng
 from point2cad.utils import sample_inr_mesh
 
 
+def open3d_mesh_to_pyvista(mesh):
+    mesh.triangle_normals = o3d.utility.Vector3dVector([])
+    with tempfile.TemporaryDirectory(prefix="point2cad_mesh_") as tmpdir:
+        path = os.path.join(tmpdir, "mesh.obj")
+        o3d.io.write_triangle_mesh(path, mesh)
+        return pv.read(path)
+
+
 def process_one_surface(label, points, labels, cfg, device):
     in_points = points[labels == label]
     if len(in_points) < 20:
@@ -22,16 +31,26 @@ def process_one_surface(label, points, labels, cfg, device):
     in_points = torch.from_numpy(in_points).to(device)
 
     # ========================= fitting basic primitives =======================
-    recon_basic_shapes = fit_basic_primitives(in_points)
+    if cfg.planes_only:
+        recon_basic_shapes = fit_plane_primitive(in_points)
+    else:
+        recon_basic_shapes = fit_basic_primitives(in_points)
 
     # ========================== fitting inrs=====================
-    recon_inr_shapes = fit_inrs(in_points, cfg, device)
+    if cfg.primitives_only or cfg.planes_only:
+        inr_err = np.inf
+    else:
+        recon_inr_shapes = fit_inrs(in_points, cfg, device)
 
     # ==========================shape selection====================
     pred_info = {}
     pred_info["id"] = int(label)
 
-    if "cone_failure" not in recon_basic_shapes.keys():
+    if cfg.planes_only:
+        cone_err = np.inf
+        sphere_err = np.inf
+        cylinder_err = np.inf
+    elif "cone_failure" not in recon_basic_shapes.keys():
         cone_err = np.inf
     elif recon_basic_shapes["cone_failure"]:
         cone_err = np.inf
@@ -39,15 +58,16 @@ def process_one_surface(label, points, labels, cfg, device):
         cone_err = recon_basic_shapes["cone_err"]
 
     plane_err = recon_basic_shapes["plane_err"]
-    sphere_err = recon_basic_shapes["sphere_err"]
-    cylinder_err = recon_basic_shapes["cylinder_err"]
+    if not cfg.planes_only:
+        sphere_err = recon_basic_shapes["sphere_err"]
+        cylinder_err = recon_basic_shapes["cylinder_err"]
 
-    if (
+    if not cfg.planes_only and (
         visualize_basic_mesh("cone", in_points, recon_basic_shapes, device=device)
         is None
     ):
         cone_err = np.inf
-    elif (
+    elif not cfg.planes_only and (
         len(
             visualize_basic_mesh(
                 "cone", in_points, recon_basic_shapes, device=device
@@ -56,12 +76,14 @@ def process_one_surface(label, points, labels, cfg, device):
         == 0
     ):
         cone_err = np.inf
-    if "cone_params" not in recon_basic_shapes.keys():
+    if cfg.planes_only:
+        pass
+    elif "cone_params" not in recon_basic_shapes.keys():
         cone_err = np.inf
     else:
         if recon_basic_shapes["cone_params"][2] >= 1.53:
             cone_err = np.inf
-    if (
+    if not cfg.planes_only and (
         len(
             visualize_basic_mesh(
                 "cylinder", in_points, recon_basic_shapes, device=device
@@ -70,7 +92,7 @@ def process_one_surface(label, points, labels, cfg, device):
         == 0
     ):
         cylinder_err = np.inf
-    if (
+    if not cfg.planes_only and (
         len(
             visualize_basic_mesh(
                 "sphere", in_points, recon_basic_shapes, device=device
@@ -80,10 +102,11 @@ def process_one_surface(label, points, labels, cfg, device):
     ):
         sphere_err = np.inf
 
-    if recon_inr_shapes["is_good_fit"]:
-        inr_err = recon_inr_shapes["err"]
-    else:
-        inr_err = np.inf
+    if not cfg.primitives_only and not cfg.planes_only:
+        if recon_inr_shapes["is_good_fit"]:
+            inr_err = recon_inr_shapes["err"]
+        else:
+            inr_err = np.inf
 
     all_errors = np.array([plane_err, sphere_err, cylinder_err, cone_err, inr_err])
     sorted_shape_indices = np.argsort(
@@ -114,10 +137,7 @@ def process_one_surface(label, points, labels, cfg, device):
         pred_mesh = visualize_basic_mesh(
             "plane", in_points, recon_basic_shapes, device=device
         )
-        pred_mesh.triangle_normals = o3d.utility.Vector3dVector([])
-        o3d.io.write_triangle_mesh("tmp.obj", pred_mesh)
-        pred_mesh = pv.read("tmp.obj")
-        os.remove("tmp.obj")
+        pred_mesh = open3d_mesh_to_pyvista(pred_mesh)
         pred_info["type"] = "plane"
         pred_info["params"] = recon_basic_shapes["plane_params"]
         pred_info["err"] = plane_err
@@ -126,10 +146,7 @@ def process_one_surface(label, points, labels, cfg, device):
         pred_mesh = visualize_basic_mesh(
             "sphere", in_points, recon_basic_shapes, device=device
         )
-        pred_mesh.triangle_normals = o3d.utility.Vector3dVector([])
-        o3d.io.write_triangle_mesh("tmp.obj", pred_mesh)
-        pred_mesh = pv.read("tmp.obj")
-        os.remove("tmp.obj")
+        pred_mesh = open3d_mesh_to_pyvista(pred_mesh)
         pred_info["type"] = "sphere"
         pred_info["params"] = recon_basic_shapes["sphere_params"]
         pred_info["err"] = sphere_err
@@ -138,10 +155,7 @@ def process_one_surface(label, points, labels, cfg, device):
         pred_mesh = visualize_basic_mesh(
             "cylinder", in_points, recon_basic_shapes, device=device
         )
-        pred_mesh.triangle_normals = o3d.utility.Vector3dVector([])
-        o3d.io.write_triangle_mesh("tmp.obj", pred_mesh)
-        pred_mesh = pv.read("tmp.obj")
-        os.remove("tmp.obj")
+        pred_mesh = open3d_mesh_to_pyvista(pred_mesh)
         pred_info["type"] = "cylinder"
         pred_info["params"] = recon_basic_shapes["cylinder_params"]
         pred_info["err"] = cylinder_err
@@ -151,10 +165,7 @@ def process_one_surface(label, points, labels, cfg, device):
             pred_mesh = visualize_basic_mesh(
                 "cone", in_points, recon_basic_shapes, device=device
             )
-            pred_mesh.triangle_normals = o3d.utility.Vector3dVector([])
-            o3d.io.write_triangle_mesh("tmp.obj", pred_mesh)
-            pred_mesh = pv.read("tmp.obj")
-            os.remove("tmp.obj")
+            pred_mesh = open3d_mesh_to_pyvista(pred_mesh)
             pred_info["type"] = "cone"
             pred_info["params"] = recon_basic_shapes["cone_params"]
             pred_info["err"] = cone_err
@@ -163,10 +174,7 @@ def process_one_surface(label, points, labels, cfg, device):
             pred_mesh = visualize_basic_mesh(
                 "plane", in_points, recon_basic_shapes, device=device
             )
-            pred_mesh.triangle_normals = o3d.utility.Vector3dVector([])
-            o3d.io.write_triangle_mesh("tmp.obj", pred_mesh)
-            pred_mesh = pv.read("tmp.obj")
-            os.remove("tmp.obj")
+            pred_mesh = open3d_mesh_to_pyvista(pred_mesh)
             pred_info["type"] = "plane"
             pred_info["params"] = recon_basic_shapes["plane_params"]
             pred_info["err"] = plane_err
@@ -286,6 +294,36 @@ def fit_basic_primitives(pts):
         recon_basic_shapes["cone_failure"] = failure
         recon_basic_shapes["cone_err"] = cone_err.tolist()
 
+    return recon_basic_shapes
+
+
+def fit_plane_primitive(pts):
+    if pts.shape[0] < 20:
+        raise ValueError("the number of points in the patch is too small")
+
+    fitting = Fit()
+    recon_basic_shapes = {}
+
+    axis, distance = fitting.fit_plane_torch(
+        points=pts,
+        normals=None,
+        weights=torch.ones_like(pts)[:, :1],
+        ids=None,
+    )
+    new_points = project_to_plane(pts, axis, distance.item())
+    plane_err = torch.linalg.norm(new_points - pts, dim=-1).mean()
+
+    new_points = fitting.sample_plane(
+        distance.item(),
+        axis.data.cpu().numpy(),
+        mean=torch.mean(new_points, 0).data.cpu().numpy(),
+    )
+    recon_basic_shapes["plane_params"] = (
+        axis.data.cpu().numpy().tolist(),
+        distance.data.cpu().numpy().tolist(),
+    )
+    recon_basic_shapes["plane_new_points"] = new_points.tolist()
+    recon_basic_shapes["plane_err"] = plane_err.data.cpu().numpy().tolist()
     return recon_basic_shapes
 
 

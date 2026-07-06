@@ -5,7 +5,7 @@ description = "Reverse Engineering CAD Models from 3D Point Clouds"
 requires-python = ">=3.9,<3.12"
 dependencies = [
     "geomdl",
-    "numpy",
+    "numpy>=1.23,<2",
     "open3d",
     "pyvista",
     "rtree",

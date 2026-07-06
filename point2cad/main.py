@@ -4,11 +4,13 @@ import numpy as np
 import os
 import torch
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 from tqdm import tqdm
 
 from point2cad.fitting_one_surface import process_one_surface
 from point2cad.io_utils import save_unclipped_meshes, save_clipped_meshes, save_topology
-from point2cad.utils import seed_everything, continuous_labels, normalize_points, make_colormap_optimal
+from point2cad.pointcloud_io import load_points_and_labels, resolve_input_paths
+from point2cad.utils import seed_everything, normalize_points, make_colormap_optimal
 
 
 def process_multiprocessing(cfg, uniq_labels, points, labels, device):
@@ -37,6 +39,36 @@ def process_singleprocessing(cfg, uniq_labels, points, labels, device):
     return out_meshes
 
 
+def run_pipeline(cfg, path_in, path_out, device, color_list, fn_process):
+    os.makedirs(path_out, exist_ok=True)
+    os.makedirs(f"{path_out}/unclipped", exist_ok=True)
+    os.makedirs(f"{path_out}/clipped", exist_ok=True)
+    os.makedirs(f"{path_out}/topo", exist_ok=True)
+
+    points, labels = load_points_and_labels(path_in, max_points=cfg.max_points)
+    points = normalize_points(points)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    uniq_labels = np.unique(labels)
+    print(f"Processing {path_in}: {len(points)} points across {len(uniq_labels)} surfaces")
+
+    out_meshes = fn_process(cfg, uniq_labels, points, labels, device)
+
+    print("Saving unclipped meshes...")
+    pm_meshes = save_unclipped_meshes(
+        out_meshes, color_list, f"{path_out}/unclipped/mesh.ply"
+    )
+
+    print("Saving clipped meshes...")
+    clipped_meshes = save_clipped_meshes(
+        pm_meshes, out_meshes, color_list, f"{path_out}/clipped/mesh.ply"
+    )
+
+    print("Saving topology (edges and corners)...")
+    save_topology(clipped_meshes, f"{path_out}/topo/topo.json")
+
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -49,8 +81,24 @@ if __name__ == "__main__":
     parser.add_argument("--silent", default=True)
     parser.add_argument("--seed", type=int, default=2023)
     parser.add_argument("--max_parallel_surfaces", type=int, default=4)
+    parser.add_argument(
+        "--max_points",
+        type=int,
+        default=10000,
+        help="Maximum input points after labeling; uses Open3D farthest point sampling. Set <=0 to disable.",
+    )
     parser.add_argument("--num_inr_fit_attempts", type=int, default=1)
     parser.add_argument("--surfaces_multiprocessing", type=int, default=1)
+    parser.add_argument(
+        "--primitives_only",
+        action="store_true",
+        help="Skip neural INR fitting; use analytic primitives only (plane, sphere, cylinder, cone)",
+    )
+    parser.add_argument(
+        "--planes_only",
+        action="store_true",
+        help="Fit only planes; skips INR and all non-planar primitives",
+    )
     cfg = parser.parse_args()
 
     seed_everything(cfg.seed)
@@ -63,43 +111,12 @@ if __name__ == "__main__":
     assert os.path.exists(cfg.path_in), "Input points could not be accessed"
     os.makedirs(cfg.path_out, exist_ok=True)
 
-    os.makedirs("{}/unclipped".format(cfg.path_out), exist_ok=True)
-    os.makedirs("{}/clipped".format(cfg.path_out), exist_ok=True)
-    os.makedirs("{}/topo".format(cfg.path_out), exist_ok=True)
-
-    # ============================ load points ============================
-    points_labels = np.loadtxt(cfg.path_in).astype(np.float32)
-    assert (
-        points_labels.shape[1] == 4
-    ), "This pipeline expects annotated point clouds (4 values per point). Refer to README for further instructions"
-    points = points_labels[:, :3]
-    labels = points_labels[:, 3].astype(np.int32)
-    labels = continuous_labels(labels)
-
-    points = normalize_points(points)
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-
-    uniq_labels = np.unique(labels)
-
-    # ============================ fit surfaces ============================
-
-    out_meshes = fn_process(cfg, uniq_labels, points, labels, device)
-
-    # ============================ save unclipped meshes ============================
-    print("Saving unclipped meshes...")
-    pm_meshes = save_unclipped_meshes(
-        out_meshes, color_list, "{}/unclipped/mesh.ply".format(cfg.path_out)
-    )
-
-    # ============================ save clipped meshes ==============================
-    print("Saving clipped meshes...")
-    clipped_meshes = save_clipped_meshes(
-        pm_meshes, out_meshes, color_list, "{}/clipped/mesh.ply".format(cfg.path_out)
-    )
-
-    # ============================ get edges and corners ============================
-    print("Saving topology (edges and corners)...")
-    save_topology(clipped_meshes, "{}/topo/topo.json".format(cfg.path_out))
+    input_paths = resolve_input_paths(cfg.path_in)
+    for path_in in input_paths:
+        if len(input_paths) == 1:
+            path_out = cfg.path_out
+        else:
+            path_out = os.path.join(cfg.path_out, Path(path_in).stem)
+        run_pipeline(cfg, path_in, path_out, device, color_list, fn_process)
 
     print("Done")
