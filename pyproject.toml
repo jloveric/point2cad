@@ -1,0 +1,19 @@
+[project]
+name = "point2cad"
+version = "0.0.0"
+description = "Reverse Engineering CAD Models from 3D Point Clouds"
+requires-python = ">=3.9,<3.12"
+dependencies = [
+    "geomdl",
+    "numpy",
+    "open3d",
+    "pyvista",
+    "rtree",
+    "scipy",
+    "torch",
+    "tqdm",
+    "trimesh",
+]
+
+[tool.uv]
+package = false
