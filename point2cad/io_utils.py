@@ -10,6 +10,10 @@ from collections import Counter
 from point2cad.utils import suppress_output_fd
 
 
+def surface_color(color_list, index):
+    return color_list[index % len(color_list)]
+
+
 def save_unclipped_meshes(meshes, color_list, out_path):
     non_clipped_meshes = []
     pm_meshes = []
@@ -18,7 +22,7 @@ def save_unclipped_meshes(meshes, color_list, out_path):
             vertices=np.array(meshes[s]["mesh"].points),
             faces=np.array(meshes[s]["mesh"].faces.reshape(-1, 4)[:, 1:]),
         )
-        tri_meshes_s.visual.face_colors = color_list[s]
+        tri_meshes_s.visual.face_colors = surface_color(color_list, s)
         non_clipped_meshes.append(tri_meshes_s)
         pm_meshes.append(
             pymesh.form_mesh(
@@ -112,7 +116,7 @@ def save_clipped_meshes(pm_meshes, out_meshes, color_list, out_path):
         result_submesh_list = [submeshes_cur[item] for item in result_indices]
 
         clipped_mesh = trimesh.util.concatenate(result_submesh_list)
-        clipped_mesh.visual.face_colors = color_list[p]
+        clipped_mesh.visual.face_colors = surface_color(color_list, p)
         clipped_meshes.append(clipped_mesh)
 
     clipped = trimesh.util.concatenate(clipped_meshes)
